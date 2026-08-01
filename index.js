@@ -2,67 +2,31 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const publicDir = path.join(__dirname, 'public');
-const publicDirResolved = path.resolve(publicDir);
-
-// Extend this as needed
-const MIME_TYPES = {
-  '.html': 'text/html; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.mjs': 'text/javascript; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.svg': 'image/svg+xml',
-  '.webp': 'image/webp',
-  '.ico': 'image/x-icon',
-  '.woff': 'font/woff',
-  '.woff2': 'font/woff2',
-  '.ttf': 'font/ttf',
-  '.txt': 'text/plain; charset=utf-8',
-  '.xml': 'application/xml; charset=utf-8',
-  '.pdf': 'application/pdf',
-};
-
-const DEFAULT_MIME = 'application/octet-stream';
-
-function getMimeType(filePath) {
-  return MIME_TYPES[path.extname(filePath).toLowerCase()] || DEFAULT_MIME;
-}
-
-function safeResolve(...segments) {
-  const resolved = path.resolve(publicDir, ...segments);
-  if (resolved !== publicDirResolved && !resolved.startsWith(publicDirResolved + path.sep)) {
-    return null;
-  }
-  return resolved;
-}
-
-function fileExists(p) {
-  return new Promise((resolve) => {
-    fs.access(p, fs.constants.F_OK, (err) => resolve(!err));
-  });
-}
-
-function serveFile(res, filePath) {
-  const stream = fs.createReadStream(filePath);
-  res.writeHead(200, { 'Content-Type': getMimeType(filePath) });
-  stream.pipe(res);
-  stream.on('error', () => {
-    res.writeHead(500);
-    res.end('Server error');
-  });
-}
+import __dirname from './lib/__dirname.js';
+import serve_file from './lib/serve_file.js'
+import file_exists from './lib/file_exists.js';
+import safe_resolve from './lib/safe_resolve.js';
 
 const server = http.createServer(async (req, res) => {
+
+  // SERVER FUNCTIONS
+  // ------------------------------------------------------------------------------------------------- //
+  switch(req.url) {
+    case '/':
+      console.log('came home');
+      break;
+    case '/other':
+      console.log('other');
+      break;
+    default:
+      console.log('invalid api route');
+  }
+  // ------------------------------------------------------------------------------------------------- //
+  // END SERVER FUNCTIONS
+
+  // STATIC ASSETS
+  // ------------------------------------------------------------------------------------------------- //
   const parsed = new URL(req.url, `http://${req.headers.host}`);
   let pathname = decodeURIComponent(parsed.pathname);
 
@@ -80,14 +44,14 @@ const server = http.createServer(async (req, res) => {
   // If the request has a non-html extension (.css, .js, .png, etc), serve it directly
   const ext = path.extname(pathname);
   if (ext && ext !== '.html') {
-    const filePath = safeResolve('.' + pathname);
+    const filePath = safe_resolve('.' + pathname);
     if (!filePath) {
       res.writeHead(400);
       res.end('Bad request');
       return;
     }
-    if (await fileExists(filePath)) {
-      serveFile(res, filePath);
+    if (await file_exists(filePath)) {
+      serve_file(res, filePath);
       return;
     }
     res.writeHead(404);
@@ -96,8 +60,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   // No extension: try directory-style index, then flat .html file
-  const indexCandidate = safeResolve('.' + pathname, 'index.html');
-  const flatCandidate = safeResolve('.' + pathname + '.html');
+  const indexCandidate = safe_resolve('.' + pathname, 'index.html');
+  const flatCandidate = safe_resolve('.' + pathname + '.html');
   const candidates = [indexCandidate, flatCandidate].filter(Boolean);
 
   if (candidates.length === 0) {
@@ -107,11 +71,13 @@ const server = http.createServer(async (req, res) => {
   }
 
   for (const filePath of candidates) {
-    if (await fileExists(filePath)) {
-      serveFile(res, filePath);
+    if (await file_exists(filePath)) {
+      serve_file(res, filePath);
       return;
     }
   }
+  // ------------------------------------------------------------------------------------------------- //
+  // END STATIC ASSETS
 
   res.writeHead(404);
   res.end('Not found');
