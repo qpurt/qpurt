@@ -11,7 +11,7 @@
     "url": "git+https://github.com/qpurt/qpurt.git"
   },
   "keywords": [],
-  "type": "commonjs",
+  "type": "module",
   "bugs": {
     "url": "https://github.com/qpurt/qpurt/issues"
   },
