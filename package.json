@@ -4,7 +4,7 @@
   "description": "Command line dev tool.",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "nodemon index.js"
   },
   "repository": {
     "type": "git",
@@ -15,5 +15,8 @@
   "bugs": {
     "url": "https://github.com/qpurt/qpurt/issues"
   },
-  "homepage": "https://github.com/qpurt/qpurt#readme"
+  "homepage": "https://github.com/qpurt/qpurt#readme",
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
 }
