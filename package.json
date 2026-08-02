@@ -1,17 +1,20 @@
 {
   "name": "qpurt",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Command line dev tool.",
+  "type": "module",
+  "license": "MIT",
   "main": "index.js",
+  "bin": {
+    "qp": "bin/cli.js"
+  },
   "scripts": {
-    "start": "nodemon index.js"
+    "start": "node lib/file_watch.js"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/qpurt/qpurt.git"
   },
-  "keywords": [],
-  "type": "module",
   "bugs": {
     "url": "https://github.com/qpurt/qpurt/issues"
   },

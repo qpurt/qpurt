@@ -4,14 +4,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import __dirname from './lib/__dirname.js';
-import serve_file from './lib/serve_file.js'
+import file_serve from './lib/file_serve.js'
 import file_exists from './lib/file_exists.js';
 import safe_resolve from './lib/safe_resolve.js';
 
 const server = http.createServer(async (req, res) => {
-
-  // SERVER FUNCTIONS
-  // ------------------------------------------------------------------------------------------------- //
   switch(req.url) {
     case '/':
       console.log('came home');
@@ -22,11 +19,7 @@ const server = http.createServer(async (req, res) => {
     default:
       console.log('invalid api route');
   }
-  // ------------------------------------------------------------------------------------------------- //
-  // END SERVER FUNCTIONS
 
-  // STATIC ASSETS
-  // ------------------------------------------------------------------------------------------------- //
   const parsed = new URL(req.url, `http://${req.headers.host}`);
   let pathname = decodeURIComponent(parsed.pathname);
 
@@ -51,7 +44,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (await file_exists(filePath)) {
-      serve_file(res, filePath);
+      file_serve(res, filePath);
       return;
     }
     res.writeHead(404);
@@ -69,10 +62,10 @@ const server = http.createServer(async (req, res) => {
     res.end('Bad request');
     return;
   }
-
+  
   for (const filePath of candidates) {
     if (await file_exists(filePath)) {
-      serve_file(res, filePath);
+      file_serve(res, filePath);
       return;
     }
   }
