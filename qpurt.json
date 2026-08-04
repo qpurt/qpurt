@@ -2,10 +2,11 @@
     "server": {
         "port": 1000,
         "static": "public",
-        "functions": "functions",
+        "functions": "func",
         "watch": true,
         "routes": [
-            { "url": "/", "func": "somefunc1" }
+            { "url": "/", "func": "func1" },
+            { "url": "/other", "func": "hello-world" }
         ]
     }
 }
