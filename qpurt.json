@@ -1,0 +1,11 @@
+{
+    "server": {
+        "port": 1000,
+        "static": "public",
+        "functions": "functions",
+        "watch": true,
+        "routes": [
+            { "url": "/", "func": "somefunc" }
+        ]
+    }
+}

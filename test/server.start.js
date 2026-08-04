@@ -1,5 +1,5 @@
 import { server } from '../index.js';
 
-const myServer = server();
+server('qpurt.json')
 
-myServer.start({ watch:false });
+.start();

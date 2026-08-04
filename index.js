@@ -1,54 +1,73 @@
 // QPURT API
+
+// Node module imports
 import fs from 'node:fs';
 import path from 'node:path';
+
+// Config Imports
+import dc from './lib/config/qpd_server.js';
 import pkg from "./package.json" with { type: 'json' };
-import file_exists from './lib/fs/file_exists.js';
 
-const _config = {
-  dir: {
-    static: false,
-    functions: false
-  },
-  watch: true, 
-  routes: [
-    { url: '/', func: 'somefunc' },
-    { url: '/other', func: 'somefunc' }
-  ]
-};
+// New file exists function
+function file_exists(filepath, mode = fs.constants.F_OK) {
+  try {
+    fs.accessSync(filepath, mode);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
-export function server() {
+// Dynamic Vars
+let pkgc, filec, objc, config;
+
+// qpurt.server()
+export function server(c=dc) {
+
+  // Check if package.json has qpConfig.server
+  if (pkg.qpConfig && pkg.qpConfig.server) pkgc = pkg.qpConfig.server;
+
+  // Check if file config provided to arg1
+  if (typeof c === 'string') {
+    if (!file_exists(path.resolve(c))) { 
+      console.log(`error: ${path.resolve(c)} does not exist..`); 
+      process.exit();
+    }
+
+   try {
+      if (path.extname(c) !== '.json') {
+        console.log('error: server (config_file) file must be .json');
+        process.exit();
+      }
+      const data = fs.readFileSync(path.resolve(c), 'utf8');
+      filec = JSON.parse(data).server;
+    } catch (err) {
+      console.error('Error:', err);
+    }
+
+  }
+
+  // Check if object config provided to arg1
+  else if (typeof c === 'object') {
+    objc = c;
+  }
+
+  // Error on wrong arg1 type
+  else {
+    console.log('error: wrong type provided to server(arg1)..');
+  }
 
   return {
 
-    start: async function(config=startConfig) {
+    // server.start()
+    start: async function() {
 
-      const static_dir = path.resolve('public');
-      const functions_dir = path.resolve('funcs');
-      
-      // Static Dir Checker
-      if (await file_exists(static_dir)) {
-        console.log('static dir exists...')
-        // RUN STATIC ROUTES
-      } else {
-        console.log('static dir does not exists...')
-      }
+      // Default config, package.json config, file config, object config
+      config = {...dc, ...pkgc, ...filec, ...objc};
 
-      // Functions Dir Checker
-      if (await file_exists(functions_dir)) {
-        // RUN BACKEND ROUTES
-        console.log('functions dir exists...')
-      } else {
-        console.log('functions dir does not exists...')
-      }
+      console.log(config);
 
-
-      if (config.watch) {
-        console.log('watch file changes in development mode...')
-      } else {
-        console.log('start server in production mode...')
-      }
-
-      console.log(startConfig.routes)
+      // Create and Start server using { config }
 
       return console.log(`start() still processing data. no return yet...`)
     }
