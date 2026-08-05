@@ -1,3 +1,5 @@
 public/
+functions/
 package-lock.json
 node_modules/
+.notes/
