@@ -1,12 +1,14 @@
 {
     "server": {
-        "port": 1000,
+        "port": 3000,
         "static": "public",
-        "functions": "func",
+        "functions": "functions",
         "watch": true,
+        "watchPaths": ["public"],
+        "watchIgnore": [],
+        "watchExtensions": [],
         "routes": [
-            { "url": "/", "func": "func1" },
-            { "url": "/other", "func": "hello-world" }
+            { "url": "/func1", "func": "func1" }
         ]
     }
 }

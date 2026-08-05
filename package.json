@@ -1,6 +1,6 @@
 {
   "name": "qpurt",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Command line dev tool.",
   "type": "module",
   "license": "MIT",
@@ -9,7 +9,7 @@
     "qp": "bin/cli.js"
   },
   "scripts": {
-    "start": "node lib/file_watch.js"
+    "start": "node test/server.start.js"
   },
   "repository": {
     "type": "git",
