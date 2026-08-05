@@ -37,11 +37,13 @@ for (let i = 0; i < args.length; i++) {
 }
 
 // Run help on no args.
-if (args.length === 0) HELP();
+// if (args.length === 0) HELP();
 
 // Commands
-positional.forEach(cmd => {
-    const handler = commands[cmd];
-    if (handler) handler(positional, parsed);
-    else console.log('unknown command: ' + cmd);
-});
+// positional.forEach(cmd => {
+//     const handler = commands[cmd];
+//     if (handler) handler(positional, parsed);
+//     else console.log('unknown command: ' + cmd);
+// });
+
+console.log('qp cli is still in development...')
