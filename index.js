@@ -4,6 +4,10 @@ import path from 'node:path';
 import url from 'node:url';
 import http from 'node:http';
 import https from 'node:https';
+import { exec as execCb } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const exec = promisify(execCb);
 
 // Read the *caller's* package.json (not qpurt's own) at runtime, relative to
 // the current working directory. A static `import "./package.json"` would
@@ -11,6 +15,9 @@ import https from 'node:https';
 // moment qpurt.js isn't sitting directly next to your project's
 // package.json (e.g. it's nested in a subfolder or installed as a
 // dependency), throwing ERR_MODULE_NOT_FOUND before server() ever runs.
+// Docs: fs.readFileSync https://nodejs.org/api/fs.html#fsreadfilesyncpath-options
+//       path.resolve    https://nodejs.org/api/path.html#pathresolvepaths
+//       process.cwd()   https://nodejs.org/api/process.html#processcwd
 function readPkg() {
   const pkgPath = path.resolve(process.cwd(), 'package.json');
   try {
@@ -26,6 +33,7 @@ function readPkg() {
 // qpurt.json files. Priority: explicit `env` on the object passed to
 // server(), then NODE_ENV, then QPURT_ENV, then "development" by default --
 // matching the common convention that unset means "not production".
+// Docs: process.env https://nodejs.org/api/process.html#processenv
 function resolveEnv(c) {
   const raw =
     (c && typeof c === 'object' && c.env) ||
@@ -49,7 +57,8 @@ function mergeEnvSection(parsed, env) {
   return { ...base, ...override };
 }
 
-let _server, _redirectServer, pkgc, filec, objc, config, entry = 'qpurt.json';
+const entry = 'qpurt.json';
+let _server, _redirectServer, pkgc, filec, objc, config;
 
 // Last-resort safety net. These should be rare if route handlers are
 // correct, but an uncaught error here would otherwise crash the process
@@ -57,6 +66,9 @@ let _server, _redirectServer, pkgc, filec, objc, config, entry = 'qpurt.json';
 // state. Log clearly and exit so a process manager (systemd/pm2/Docker
 // restart policy) can restart cleanly -- don't try to keep running after
 // state may be corrupted.
+// Docs: 'uncaughtException'   https://nodejs.org/api/process.html#event-uncaughtexception
+//       'unhandledRejection'  https://nodejs.org/api/process.html#event-unhandledrejection
+//       process.exit          https://nodejs.org/api/process.html#processexitcode
 process.on('uncaughtException', (err) => {
   console.error('[qpurt] uncaught exception, exiting:', err);
   process.exit(1);
@@ -67,11 +79,35 @@ process.on('unhandledRejection', (reason) => {
 });
 
 
-let dc = {
+const dc = {
   port: 3000,
   static: 'public',
   functions: 'functions',
   watch: true,
+  // fs.watch's `recursive` option isn't reliably honored for deep
+  // subfolders on Linux (it's native on macOS/Windows). On Linux, qpurt
+  // tries to use chokidar instead for the functions/watchPaths hot-reload
+  // watcher, installing it on first use if it isn't already present.
+  //
+  // NOTE ON "ZERO DEPENDENCIES": with this on (the default), qpurt is not
+  // strictly zero-dependency at runtime -- on Linux it can shell out to
+  // `npm install chokidar` and load it. What IS still true: chokidar is
+  // never declared anywhere (installed with --no-save, so package.json
+  // and any lockfile stay untouched -- it's invisible to the dependency
+  // tree and to anyone else who clones the project and runs `npm
+  // install`), and if the install can't happen or fails for any reason,
+  // qpurt falls back to the original pure-fs.watch behavior rather than
+  // erroring. So: zero *declared* dependencies with a self-healing
+  // optional one, not zero dependencies, full stop. If that distinction
+  // matters for your deployment, set this to false -- see below.
+  //
+  // Set to false to always use fs.watch instead and guarantee qpurt never
+  // touches node_modules on its own -- e.g. in a locked-down environment,
+  // or one that's genuinely offline, or if the zero-dependency property
+  // needs to hold in the strict sense. Has no effect on macOS/Windows,
+  // where fs.watch is already reliable, or if chokidar is already
+  // installed (then it's just used, no install attempted).
+  autoInstallChokidar: true,
   // Extra paths to watch besides `functions` (files or directories).
   watchPaths: [],
   // Glob-style patterns (relative to project root) to exclude from
@@ -97,13 +133,28 @@ let dc = {
   ],
   // Basic security response headers applied to every response. Set to null
   // or {} to disable.
+  // Docs: X-Content-Type-Options https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Content-Type-Options
+  //       X-Frame-Options        https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Frame-Options
+  //       Referrer-Policy        https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Referrer-Policy
+  // Docs: Permissions-Policy https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Permissions-Policy
+  // Note: Content-Security-Policy is deliberately NOT set here -- a good
+  // CSP is site-specific (inline scripts, third-party embeds, etc. all
+  // affect it) and a wrong default is more likely to break your site than
+  // help it. Add one in your own `securityHeaders` override once you know
+  // what your pages actually load.
   securityHeaders: {
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
-    'Referrer-Policy': 'no-referrer-when-downgrade'
+    'Referrer-Policy': 'no-referrer-when-downgrade',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=()'
   },
   // Built-in http.Server hardening against slow-connection (Slowloris-style)
   // attacks. All are plain Node http.Server options, no dependency needed.
+  // Docs: headersTimeout   https://nodejs.org/api/http.html#serverheaderstimeout
+  //       requestTimeout   https://nodejs.org/api/http.html#serverrequesttimeout
+  //       keepAliveTimeout https://nodejs.org/api/http.html#serverkeepalivetimeout
+  //       maxHeadersCount  https://nodejs.org/api/http.html#servermaxheaderscount
+  //       maxConnections   https://nodejs.org/api/net.html#servermaxconnections
   headersTimeout: 20000,   // ms allowed to receive the full request headers
   requestTimeout: 30000,   // ms allowed to receive the full request
   keepAliveTimeout: 5000,  // ms an idle keep-alive connection is held open
@@ -114,25 +165,39 @@ let dc = {
   // relative to the project root (process.cwd()). `port` above becomes the
   // HTTPS port (443 typically needs root or setcap on Linux).
   //   tls: { cert: 'certs/fullchain.pem', key: 'certs/privkey.pem', ca: null }
+  // Docs: https.createServer https://nodejs.org/api/https.html#httpscreateserveroptions-requestlistener
   tls: null,
   // Automatically reload the cert/key from disk when the files change (e.g.
   // `certbot renew` swaps them in-place), without restarting the process.
+  // Docs: tls.Server.setSecureContext https://nodejs.org/api/tls.html#serversetsecurecontextoptions
   watchTls: true,
   // When TLS is enabled, also start a small plain-HTTP listener on this
   // port that (a) serves ACME HTTP-01 challenge files from
   // `<static>/.well-known/acme-challenge/` so `certbot --webroot` works
   // without a proxy, and (b) 301-redirects everything else to HTTPS.
   // Set to 0 to disable this secondary listener entirely.
+  // Docs: ACME HTTP-01 challenge https://letsencrypt.org/docs/challenge-types/#http-01-challenge
   httpPort: 80,
   httpsRedirect: true,
   // Explicit escape hatch: forces plain HTTP even if `tls` is configured
   // (e.g. useful if `tls` lives in the shared base config and you only
   // want to disable it for one environment). Normally you'd just omit
   // `tls` from the dev override block instead -- see server(c) docs.
-  forceHttp: false
+  forceHttp: false,
+
+  // Per-IP request-rate limiting. `maxConnections` above caps concurrent
+  // sockets, not request *rate* -- a single connection can still fire an
+  // unbounded number of requests over a keep-alive socket. Off by default
+  // (null) so existing setups behave exactly as before; set e.g.
+  // `{ windowMs: 60000, max: 300 }` to allow 300 requests per IP per
+  // rolling minute before responding 429. Deliberately simple/in-memory --
+  // fine for a single instance behind no load balancer; for multi-instance
+  // deployments use a shared store (e.g. Redis) in front of qpurt instead.
+  rateLimit: null
 };
 
 const _DEFAULT_MIME = 'application/octet-stream';
+// Docs: MIME types reference https://developer.mozilla.org/en-US/docs/Web/HTTP/MIME_types
 const _MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
@@ -151,7 +216,7 @@ const _MIME_TYPES = {
   '.ttf': 'font/ttf',
   '.txt': 'text/plain; charset=utf-8',
   '.xml': 'application/xml; charset=utf-8',
-  '.pdf': 'application/pdf',
+  '.pdf': 'application/pdf'
 };
 
 function get_mime_types(filePath) {
@@ -160,16 +225,32 @@ function get_mime_types(filePath) {
   ] || _DEFAULT_MIME;
 };
 
+// Docs: fs.createReadStream https://nodejs.org/api/fs.html#fscreatereadstreampath-options
+//       stream.pipe         https://nodejs.org/api/stream.html#readablepipedestination-options
+//       res.headersSent     https://nodejs.org/api/http.html#responseheaderssent
+//
+// SECURITY/STABILITY: headers are written before piping starts, so if the
+// stream errors mid-read (permissions change, disk error, file deleted
+// after the exists check), headers are already sent -- calling
+// res.writeHead(500) again throws ERR_HTTP_HEADERS_SENT. Left unguarded,
+// that uncaught throw hits the process-level uncaughtException handler
+// above and takes the *entire server* down over a single bad file read.
 function file_serve(res, filePath) {
   const stream = fs.createReadStream(filePath);
+  stream.on('error', (err) => {
+    console.error(`[qpurt] error streaming ${filePath}:`, err);
+    if (!res.headersSent) {
+      res.writeHead(500);
+      res.end('Server error');
+    } else if (!res.writableEnded) {
+      res.destroy();
+    }
+  });
   res.writeHead(200, { 'Content-Type': get_mime_types(filePath) });
   stream.pipe(res);
-  stream.on('error', () => {
-    res.writeHead(500);
-    res.end('Server error');
-  });
 };
 
+// Docs: fs.accessSync https://nodejs.org/api/fs.html#fsaccesssyncpath-mode
 function file_exists(filepath, mode = fs.constants.F_OK) {
   try {
     fs.accessSync(filepath, mode);
@@ -183,6 +264,7 @@ function file_exists(filepath, mode = fs.constants.F_OK) {
 // Loads cert/key (and optional CA) from disk, relative to the project root.
 // Throws with a clear message on missing/unreadable files rather than
 // letting https.createServer fail with an opaque error.
+// Docs: TLS options (cert/key/ca) https://nodejs.org/api/tls.html#tlscreatesecurecontextoptions
 function loadTlsOptions(tlsCfg) {
   const certPath = path.resolve(process.cwd(), tlsCfg.cert);
   const keyPath = path.resolve(process.cwd(), tlsCfg.key);
@@ -213,6 +295,9 @@ function loadTlsOptions(tlsCfg) {
 // matters because tools like certbot typically renew via an atomic
 // rename/symlink-swap, which a watch on the file path itself can miss on
 // Linux (inotify loses the watch when the underlying inode is replaced).
+// Docs: fs.watch               https://nodejs.org/api/fs.html#fswatchfilename-options-listener
+//       tls.Server.setSecureContext https://nodejs.org/api/tls.html#serversetsecurecontextoptions
+//       inotify caveats (fs.watch "Availability" note) https://nodejs.org/api/fs.html#availability
 function watchTlsFiles(server, tlsCfg) {
   const dirs = new Set([
     path.dirname(path.resolve(process.cwd(), tlsCfg.cert)),
@@ -247,13 +332,28 @@ function watchTlsFiles(server, tlsCfg) {
 // Minimal plain-HTTP server used only when TLS is enabled. Serves ACME
 // HTTP-01 challenge files (so `certbot --webroot` works with zero proxy)
 // and 301-redirects everything else to HTTPS.
+// Docs: http.createServer https://nodejs.org/api/http.html#httpcreateserveroptions-requestlistener
+//       URL                https://nodejs.org/api/url.html#class-url
+//       301 Moved Permanently https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/301
 function startHttpRedirectServer(cfg) {
   const publicDir = path.join(process.cwd(), cfg.static);
   const publicDirResolved = path.resolve(publicDir);
 
   const redirectServer = http.createServer((req, res) => {
     const parsed = new URL(req.url, `http://${req.headers.host}`);
-    const pathname = decodeURIComponent(parsed.pathname);
+    // SECURITY: decodeURIComponent throws URIError on malformed
+    // percent-encoding (e.g. a request for "/%"). Uncaught, that would
+    // propagate out of this synchronous listener and hit the
+    // process-level uncaughtException handler -- letting one malformed
+    // request crash the server. Docs: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/decodeURIComponent#exceptions
+    let pathname;
+    try {
+      pathname = decodeURIComponent(parsed.pathname);
+    } catch {
+      res.writeHead(400);
+      res.end('Bad request');
+      return;
+    }
 
     if (pathname.startsWith('/.well-known/acme-challenge/')) {
       const resolved = path.resolve(publicDir, '.' + pathname);
@@ -301,12 +401,46 @@ function startHttpRedirectServer(cfg) {
   return redirectServer;
 }
 
+// ---- Rate limiting ----------------------------------------------------------
+// Simple in-memory sliding-window limiter keyed by remote address. Deliberately
+// minimal (no external deps) -- see the `rateLimit` config comment for scope
+// and limitations (single-instance only).
+// Docs: net.Socket.remoteAddress https://nodejs.org/api/net.html#socketremoteaddress
+function createRateLimiter({ windowMs, max }) {
+  const hits = new Map(); // ip -> array of request timestamps (ms)
+
+  // Periodically drop IPs with no recent activity so the map doesn't grow
+  // forever under normal traffic. unref() so this timer never keeps the
+  // process alive on its own.
+  const sweepInterval = setInterval(() => {
+    const cutoff = Date.now() - windowMs;
+    for (const [ip, timestamps] of hits) {
+      if (timestamps[timestamps.length - 1] < cutoff) hits.delete(ip);
+    }
+  }, windowMs).unref();
+
+  return {
+    allow(req) {
+      const ip = req.socket.remoteAddress || 'unknown';
+      const now = Date.now();
+      const cutoff = now - windowMs;
+      const timestamps = (hits.get(ip) || []).filter(t => t > cutoff);
+      timestamps.push(now);
+      hits.set(ip, timestamps);
+      return timestamps.length <= max;
+    },
+    _sweepInterval: sweepInterval // exposed for tests/shutdown, not used elsewhere
+  };
+}
+
 // ---- Ignore-pattern matching -----------------------------------------------
 // Small dependency-free glob matcher supporting `*` (any chars, not `/`),
 // `**` (any chars, including `/`), and `?` (single char). Patterns and the
 // path being tested are both normalized to forward slashes and matched
 // relative to the project root, so `**/*.test.js` or `functions/tmp/**`
 // behave the way you'd expect from .gitignore-style globs.
+// Docs: gitignore pattern format (for comparison) https://git-scm.com/docs/gitignore#_pattern_format
+//       RegExp                                     https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp
 
 function globToRegExp(pattern) {
   const normalized = pattern.replace(/\\/g, '/');
@@ -333,6 +467,7 @@ function globToRegExp(pattern) {
   return new RegExp('^' + out + '$');
 }
 
+// Docs: path.relative https://nodejs.org/api/path.html#pathrelativefrom-to
 function isIgnored(absPath, ignorePatterns, root) {
   if (!ignorePatterns || ignorePatterns.length === 0) return false;
   const rel = path.relative(root, absPath).split(path.sep).join('/');
@@ -343,6 +478,9 @@ function isIgnored(absPath, ignorePatterns, root) {
 // Node caches ES module imports by resolved URL, so re-importing the same
 // path after an edit returns the stale cached module. We bust the cache by
 // appending a version query string that changes whenever the file changes.
+// Docs: dynamic import()   https://nodejs.org/api/esm.html#import-expressions
+//       url.pathToFileURL  https://nodejs.org/api/url.html#urlpathtofileurlpath-options
+//       ESM module caching (per-URL, not re-evaluated on identical import) https://nodejs.org/api/esm.html#modules-ecmascript-modules
 
 const _funcVersions = new Map();
 let _watchersStarted = false;
@@ -369,18 +507,130 @@ function extensionAllowed(filePath, allowedExts) {
   return allowedExts.has(path.extname(filePath).toLowerCase());
 }
 
-function watchPath(root, targetPath, ignorePatterns, allowedExts) {
+// ---- Watcher backend (chokidar vs fs.watch) --------------------------------
+// fs.watch's `recursive` option is native on macOS/Windows but not reliably
+// honored for deep subfolders on Linux (inotify-based, no built-in recursive
+// mode -- see the fs.watch "Availability" notes linked above). chokidar
+// papers over that with its own recursive directory walking, so on Linux we
+// prefer it for the functions/watchPaths hot-reload watcher and install it
+// on first use if it's missing.
+//
+// This is qpurt's one and only place where an external package can enter
+// the picture, and it's deliberately narrow: nothing else in this file
+// imports anything beyond Node core. Two things are still true even with
+// this in place -- (1) the install uses --no-save, so chokidar is never
+// written to package.json/lockfile and stays invisible to the caller's own
+// dependency tree, and (2) every code path here has a working fs.watch
+// fallback, so a failed or declined install degrades gracefully rather than
+// erroring. What's NOT true is a strict "zero dependencies, full stop"
+// claim -- on Linux, with the default config, qpurt can and will run `npm
+// install` on its own. Set `autoInstallChokidar: false` (see config above)
+// if that needs to never happen in your deployment.
+//
+// Resolution result is cached at module scope (`_chokidar`) so the install
+// is attempted at most once per process, even if multiple paths are watched.
+// Docs: chokidar https://github.com/paulmillr/chokidar
+//       npm install https://docs.npmjs.com/cli/v10/commands/npm-install
+let _chokidar; // undefined = not yet resolved, null = unavailable/declined, module = ready
+let _chokidarResolving;
+
+async function resolveChokidar(cfg) {
+  if (_chokidar !== undefined) return _chokidar;
+  // Concurrent callers (multiple watched paths resolving at once) share one
+  // in-flight resolution instead of each attempting their own install.
+  if (_chokidarResolving) return _chokidarResolving;
+
+  _chokidarResolving = (async () => {
+    if (process.platform !== 'linux') {
+      // fs.watch's recursive mode is already reliable here -- no need to
+      // add a dependency.
+      _chokidar = null;
+      return null;
+    }
+
+    try {
+      _chokidar = await import('chokidar');
+      return _chokidar;
+    } catch {
+      // not installed yet -- fall through to the install attempt below
+    }
+
+    if (!cfg.autoInstallChokidar) {
+      console.log(
+        '[qpurt] chokidar not installed and autoInstallChokidar is false -- ' +
+        'using fs.watch (recursive subfolder changes on Linux may be missed).'
+      );
+      _chokidar = null;
+      return null;
+    }
+
+    console.log('[qpurt] Linux detected and chokidar not found -- installing it in the background for reliable recursive watching...');
+    try {
+      // --no-save: installs into node_modules without touching the
+      // caller's package.json/lockfile. It's still on disk for next
+      // startup, so this only runs once per environment.
+      //
+      // Uses the async `exec` (not `execSync`) deliberately: npm install
+      // can take several seconds, and execSync blocks Node's entire
+      // single-threaded event loop for that whole time -- even called from
+      // inside an async function, nothing else (including in-flight HTTP
+      // requests) runs until it returns. exec runs npm in a child process
+      // and only awaits its completion, so the server keeps serving
+      // requests (via fs.watch, until chokidar is ready) while it installs.
+      // Docs: child_process.exec https://nodejs.org/api/child_process.html#child_processexeccommand-options-callback
+      const { stdout, stderr } = await exec('npm install chokidar --no-save', { cwd: process.cwd() });
+      if (stdout.trim()) console.log(stdout.trim());
+      if (stderr.trim()) console.error(stderr.trim());
+      _chokidar = await import('chokidar');
+      console.log('[qpurt] chokidar installed.');
+      return _chokidar;
+    } catch (err) {
+      console.error(
+        '[qpurt] failed to install/load chokidar, falling back to fs.watch ' +
+        '(recursive subfolder changes on Linux may be missed):', err.message
+      );
+      _chokidar = null;
+      return null;
+    }
+  })();
+
+  return _chokidarResolving;
+}
+
+// Watches `targetPath` recursively and calls onChange(absolutePath) for
+// every change that passes the extension/ignore filters. Uses chokidar when
+// available (see resolveChokidar above), otherwise fs.watch.
+// Docs: fs.watch  https://nodejs.org/api/fs.html#fswatchfilename-options-listener
+//       chokidar  https://github.com/paulmillr/chokidar#api
+async function watchPath(root, targetPath, ignorePatterns, allowedExts, onChange, cfg) {
   const resolved = path.resolve(targetPath);
   if (!file_exists(resolved)) {
     console.log(`[qpurt] warning: watch path does not exist, skipping: ${resolved}`);
     return;
   }
 
+  const chokidar = await resolveChokidar(cfg);
+
+  if (chokidar) {
+    const watcher = chokidar.watch(resolved, {
+      ignoreInitial: true,
+      ignored: (filePath) => isIgnored(path.resolve(filePath), ignorePatterns, root)
+    });
+    watcher.on('all', (eventType, filePath) => {
+      const changed = path.resolve(filePath);
+      if (!extensionAllowed(changed, allowedExts)) return;
+      onChange(changed);
+    });
+    watcher.on('error', (err) => console.error(`[qpurt] chokidar watch error for ${resolved}:`, err));
+    return;
+  }
+
   try {
-    // recursive watching is native on macOS/Windows; on Linux, fs.watch only
-    // honors `recursive` for the directory itself, not guaranteed for deep
-    // subfolders — swap for chokidar if you need reliable recursive watching
-    // there.
+    // recursive watching is native on macOS/Windows; on Linux this only
+    // reliably covers the directory itself, not guaranteed for deep
+    // subfolders. We only reach this path on Linux if chokidar was
+    // unavailable and couldn't be installed (or autoInstallChokidar was
+    // turned off) -- see resolveChokidar above.
     fs.watch(resolved, { recursive: true }, (eventType, filename) => {
       if (!filename) return;
       const changed = path.resolve(resolved, filename);
@@ -388,21 +638,25 @@ function watchPath(root, targetPath, ignorePatterns, allowedExts) {
       if (!extensionAllowed(changed, allowedExts)) return;
       if (isIgnored(changed, ignorePatterns, root)) return;
 
-      bumpVersion(changed);
-      console.log(`[qpurt] reloaded ${path.relative(root, changed)}`);
+      onChange(changed);
     });
   } catch (err) {
     console.error(`[qpurt] failed to watch ${resolved}:`, err);
   }
 }
 
-function startWatcher(cfg) {
+async function startWatcher(cfg) {
   if (_watchersStarted) return;
   _watchersStarted = true;
 
   const root = process.cwd();
   const ignorePatterns = cfg.watchIgnore || [];
   const allowedExts = normalizeExtensions(cfg.watchExtensions);
+
+  const onChange = (changed) => {
+    bumpVersion(changed);
+    console.log(`[qpurt] reloaded ${path.relative(root, changed)}`);
+  };
 
   // Watch the functions dir plus any extra paths the user configured.
   const paths = [cfg.functions, ...(cfg.watchPaths || [])].filter(Boolean);
@@ -412,11 +666,13 @@ function startWatcher(cfg) {
     const resolved = path.resolve(p);
     if (seen.has(resolved)) continue;
     seen.add(resolved);
-    watchPath(root, resolved, ignorePatterns, allowedExts);
+    await watchPath(root, resolved, ignorePatterns, allowedExts, onChange, cfg);
   }
 
   const entryPath = path.resolve(entry);
   if (file_exists(entryPath) && !isIgnored(entryPath, ignorePatterns, root)) {
+    // Single-file watch -- not subject to the recursive-subfolder caveat
+    // above, so plain fs.watch is fine here regardless of platform.
     fs.watch(entryPath, () => {
       try {
         const data = fs.readFileSync(entryPath, 'utf8');
@@ -433,6 +689,8 @@ function startWatcher(cfg) {
   }
 }
 
+// Docs: http.createServer  https://nodejs.org/api/http.html#httpcreateserveroptions-requestlistener
+//       https.createServer https://nodejs.org/api/https.html#httpscreateserveroptions-requestlistener
 export function server(c) {
 
   const resolvedEnv = resolveEnv(c);
@@ -479,11 +737,18 @@ export function server(c) {
   // Default config, package.json config, file config, object config.
   // `env` is set last so it always reflects the actually-resolved value,
   // regardless of what any layer happened to contain.
+  // Docs: object spread https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Spread_syntax
   config = { ...dc, ...pkgc, ...filec, ...objc, env: resolvedEnv };
 
   const publicDir = path.join(process.cwd(), config.static);
   const publicDirResolved = path.resolve(publicDir);
 
+  const limiter = config.rateLimit ? createRateLimiter(config.rateLimit) : null;
+
+  // Prevents path traversal (e.g. `../../etc/passwd`) by rejecting any
+  // resolved path that falls outside `publicDir`, and enforces
+  // `blockedPatterns` against the path relative to the static root.
+  // Docs: path traversal (OWASP) https://owasp.org/www-community/attacks/Path_Traversal
   function safe_resolve(...segments) {
     const resolved = path.resolve(publicDir, ...segments);
     if (resolved !== publicDirResolved && !resolved.startsWith(publicDirResolved + path.sep)) {
@@ -501,7 +766,9 @@ export function server(c) {
     return resolved;
   };
 
-  const requestHandler = async (req, res) => {
+  // Docs: http.IncomingMessage / http.ServerResponse https://nodejs.org/api/http.html#class-httpincomingmessage
+  //       res.setHeader vs res.writeHead              https://nodejs.org/api/http.html#responsesetheadername-value
+  const handleRequest = async (req, res) => {
     // Apply baseline security headers to every response up front via
     // setHeader (not writeHead) so they survive no matter which code path
     // eventually calls res.writeHead()/res.end() below.
@@ -510,6 +777,7 @@ export function server(c) {
     }
     // HSTS only makes sense once TLS is actually serving the response --
     // sending it over plain HTTP would be a lie the browser can't verify.
+    // Docs: Strict-Transport-Security https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Strict-Transport-Security
     if (useTls) {
       res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
     }
@@ -541,14 +809,14 @@ export function server(c) {
               console.error(
                 `[qpurt] route "${route.url}" (${route.func}) did not respond ` +
                 `within ${config.routeTimeout}ms -- check for a missing res.end() ` +
-                `or an unresolved await in that handler.`
+                'or an unresolved await in that handler.'
               );
               res.writeHead(504);
               res.end('Gateway Timeout: route handler did not respond in time');
             } else if (!res.writableEnded) {
               console.error(
                 `[qpurt] route "${route.url}" (${route.func}) started a response ` +
-                `but never finished it (missing res.end()?).`
+                'but never finished it (missing res.end()?).'
               );
             }
           }, config.routeTimeout);
@@ -559,7 +827,7 @@ export function server(c) {
           if (!timedOut && !res.writableEnded && !res.headersSent) {
             console.error(
               `[qpurt] route "${route.url}" (${route.func}) returned without ` +
-              `sending a response -- did you forget res.end()?`
+              'sending a response -- did you forget res.end()?'
             );
           }
         } else {
@@ -577,7 +845,16 @@ export function server(c) {
     }
 
     const parsed = new URL(req.url, `http://${req.headers.host}`);
-    let pathname = decodeURIComponent(parsed.pathname);
+    // SECURITY: see the matching decodeURIComponent guard in
+    // startHttpRedirectServer above -- same crash, same fix.
+    let pathname;
+    try {
+      pathname = decodeURIComponent(parsed.pathname);
+    } catch {
+      res.writeHead(400);
+      res.end('Bad request');
+      return;
+    }
 
     // Redirect *.html -> clean URL (only for HTML; other assets keep their extension)
     if (pathname.endsWith('.html')) {
@@ -630,6 +907,32 @@ export function server(c) {
     res.end('Not found');
   };
 
+  // SECURITY: last-line-of-defense wrapper. handleRequest already guards
+  // its own known failure points, but this ensures *no* per-request error
+  // -- known or not -- can escape to the process-level uncaughtException /
+  // unhandledRejection handlers defined at module load time, which
+  // deliberately exit(1). Without this, a single crafted or unlucky
+  // request could take the entire server down; with it, at worst that one
+  // request gets a 500.
+  const requestHandler = async (req, res) => {
+    if (limiter && !limiter.allow(req)) {
+      res.writeHead(429, { 'Retry-After': String(Math.ceil(config.rateLimit.windowMs / 1000)) });
+      res.end('Too Many Requests');
+      return;
+    }
+    try {
+      await handleRequest(req, res);
+    } catch (err) {
+      console.error('[qpurt] unhandled error in request handler:', err);
+      if (!res.headersSent) {
+        res.writeHead(500);
+        res.end('Server error');
+      } else if (!res.writableEnded) {
+        res.destroy();
+      }
+    }
+  };
+
   const useTls = !config.forceHttp && !!(config.tls && config.tls.cert && config.tls.key);
   if (useTls) {
     const tlsOptions = {
@@ -638,6 +941,7 @@ export function server(c) {
       // pinning it here means the minimum can't silently drift if Node's
       // own default ever changes, or if someone adds conflicting options
       // to config.tls later.
+      // Docs: tls minVersion https://nodejs.org/api/tls.html#tlscreatesecurecontextoptions
       minVersion: 'TLSv1.2'
     };
     _server = https.createServer(tlsOptions, requestHandler);
@@ -651,7 +955,9 @@ export function server(c) {
     // qpurt.server.start()
     start: async function () {
       // Slowloris-style hardening -- built into Node's http.Server, no
-      // dependency required. See config comments above for what each does.
+      // dependency required. See config comments above for what each does,
+      // and the Node docs linked there.
+      // Docs: Slowloris (OWASP) https://owasp.org/www-community/attacks/Slowloris_HTTP_DoS
       _server.headersTimeout = config.headersTimeout;
       _server.requestTimeout = config.requestTimeout;
       _server.keepAliveTimeout = config.keepAliveTimeout;
@@ -679,7 +985,9 @@ export function server(c) {
           }
         }
         if (config.watch) {
-          startWatcher(config);
+          startWatcher(config).catch((err) => {
+            console.error('[qpurt] failed to start file watcher:', err);
+          });
           const watched = [config.functions, ...(config.watchPaths || [])].filter(Boolean);
           console.log(`[qpurt] watching for changes in: ${watched.join(', ')}`);
           if (config.watchIgnore && config.watchIgnore.length) {
@@ -699,6 +1007,8 @@ export function server(c) {
       // Graceful shutdown: stop accepting new connections and let in-flight
       // requests finish before exiting, instead of dying mid-response when
       // the process manager (Docker/systemd/k8s) sends SIGTERM on redeploy.
+      // Docs: server.close    https://nodejs.org/api/http.html#serverclosecallback
+      //       Signal events   https://nodejs.org/api/process.html#signal-events
       const shutdown = (signal) => {
         console.log(`[qpurt] received ${signal}, shutting down gracefully...`);
         let pending = 1;
@@ -716,7 +1026,7 @@ export function server(c) {
       };
       process.on('SIGTERM', () => shutdown('SIGTERM'));
       process.on('SIGINT', () => shutdown('SIGINT'));
-    },
+    }
 
   };
 
