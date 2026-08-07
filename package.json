@@ -1,6 +1,6 @@
 {
   "name": "qpurt",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Lightweight, zero-dependency Node.js library with a self-healing fallback.",
   "type": "module",
   "license": "MIT",
