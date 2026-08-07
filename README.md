@@ -1,6 +1,6 @@
 # QPURT
 
-> Lightweight, zero-dependency Node.js library with a self-healing fallback.
+> Lightweight, zero-dependency Node.js server with a self-healing fallback.
 
 ---
 
