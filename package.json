@@ -1,17 +1,22 @@
 {
   "name": "qpurt",
   "version": "0.10.0",
-  "description": "Lightweight, zero-dependency Node.js server with a self-healing fallback.",
-  "type": "module",
+  "description": "A single-file, zero-dependency Node.js HTTP(S) server",
+  "author": {
+    "name": "Michael Arakilian",
+    "email": "arakilian0@gmail.com",
+    "url": "https://github.com/arakilian0"
+  },
   "license": "MIT",
+  "type": "module",
   "main": "qpurt.min.js",
   "bin": {
     "qp": "bin/cli.js"
   },
   "scripts": {
-    "start": "node test/server.start.js"
+    "start": "node test/server.start.js",
+    "minify": "npx terser qpurt.js --compress --mangle --module -o qpurt.min.js"
   },
-  "keywords": ["qpurt", "web", "http", "router", "app", "api"],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/qpurt/qpurt.git"
@@ -19,5 +24,6 @@
   "bugs": {
     "url": "https://github.com/qpurt/qpurt/issues"
   },
-  "homepage": "https://github.com/qpurt/qpurt#readme"
+  "homepage": "https://github.com/qpurt/qpurt#readme",
+  "keywords": ["qpurt", "web", "http", "router", "app", "api"]
 }
