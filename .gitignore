@@ -1,6 +1,7 @@
 public/
 functions/
-qpurt.json
-package-lock.json
 node_modules/
 .notes/
+.vscode/
+qpurt.json
+package-lock.json
