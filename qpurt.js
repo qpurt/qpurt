@@ -4,10 +4,6 @@ import path from 'node:path';
 import url from 'node:url';
 import http from 'node:http';
 import https from 'node:https';
-import { exec as execCb } from 'node:child_process';
-import { promisify } from 'node:util';
-
-const exec = promisify(execCb);
 
 // Read the *caller's* package.json (not qpurt's own) at runtime, relative to
 // the current working directory. A static `import "./package.json"` would
@@ -85,29 +81,12 @@ const dc = {
   functions: 'functions',
   watch: true,
   // fs.watch's `recursive` option isn't reliably honored for deep
-  // subfolders on Linux (it's native on macOS/Windows). On Linux, qpurt
-  // tries to use chokidar instead for the functions/watchPaths hot-reload
-  // watcher, installing it on first use if it isn't already present.
-  //
-  // NOTE ON "ZERO DEPENDENCIES": with this on (the default), qpurt is not
-  // strictly zero-dependency at runtime -- on Linux it can shell out to
-  // `npm install chokidar` and load it. What IS still true: chokidar is
-  // never declared anywhere (installed with --no-save, so package.json
-  // and any lockfile stay untouched -- it's invisible to the dependency
-  // tree and to anyone else who clones the project and runs `npm
-  // install`), and if the install can't happen or fails for any reason,
-  // qpurt falls back to the original pure-fs.watch behavior rather than
-  // erroring. So: zero *declared* dependencies with a self-healing
-  // optional one, not zero dependencies, full stop. If that distinction
-  // matters for your deployment, set this to false -- see below.
-  //
-  // Set to false to always use fs.watch instead and guarantee qpurt never
-  // touches node_modules on its own -- e.g. in a locked-down environment,
-  // or one that's genuinely offline, or if the zero-dependency property
-  // needs to hold in the strict sense. Has no effect on macOS/Windows,
-  // where fs.watch is already reliable, or if chokidar is already
-  // installed (then it's just used, no install attempted).
-  autoInstallChokidar: true,
+  // subfolders on Linux (it's native on macOS/Windows). qpurt is
+  // genuinely zero-dependency on every platform: instead of reaching for
+  // a package like chokidar to paper over that, it walks the watched
+  // directory tree itself and puts a plain fs.watch on every subfolder --
+  // see DirTreeWatcher below. Nothing here ever touches node_modules or
+  // shells out to npm.
   // Extra paths to watch besides `functions` (files or directories).
   watchPaths: [],
   // Glob-style patterns (relative to project root) to exclude from
@@ -507,145 +486,173 @@ function extensionAllowed(filePath, allowedExts) {
   return allowedExts.has(path.extname(filePath).toLowerCase());
 }
 
-// ---- Watcher backend (chokidar vs fs.watch) --------------------------------
-// fs.watch's `recursive` option is native on macOS/Windows but not reliably
-// honored for deep subfolders on Linux (inotify-based, no built-in recursive
-// mode -- see the fs.watch "Availability" notes linked above). chokidar
-// papers over that with its own recursive directory walking, so on Linux we
-// prefer it for the functions/watchPaths hot-reload watcher and install it
-// on first use if it's missing.
+// ---- Recursive directory watching (no dependency, all platforms) ----------
+// fs.watch's `recursive: true` option is native and reliable on
+// macOS/Windows, but on Linux (inotify-backed) it silently only covers the
+// top-level directory -- changes in subfolders can be missed. Rather than
+// reach for a package like chokidar to paper over that, DirTreeWatcher
+// walks the tree itself up front and puts a plain (non-recursive, which IS
+// reliable everywhere) fs.watch on every directory it finds, then keeps
+// that set of watched directories in sync as subfolders are created or
+// removed underneath the root.
 //
-// This is qpurt's one and only place where an external package can enter
-// the picture, and it's deliberately narrow: nothing else in this file
-// imports anything beyond Node core. Two things are still true even with
-// this in place -- (1) the install uses --no-save, so chokidar is never
-// written to package.json/lockfile and stays invisible to the caller's own
-// dependency tree, and (2) every code path here has a working fs.watch
-// fallback, so a failed or declined install degrades gracefully rather than
-// erroring. What's NOT true is a strict "zero dependencies, full stop"
-// claim -- on Linux, with the default config, qpurt can and will run `npm
-// install` on its own. Set `autoInstallChokidar: false` (see config above)
-// if that needs to never happen in your deployment.
-//
-// Resolution result is cached at module scope (`_chokidar`) so the install
-// is attempted at most once per process, even if multiple paths are watched.
-// Docs: chokidar https://github.com/paulmillr/chokidar
-//       npm install https://docs.npmjs.com/cli/v10/commands/npm-install
-let _chokidar; // undefined = not yet resolved, null = unavailable/declined, module = ready
-let _chokidarResolving;
+// This is what makes qpurt's "zero dependencies" claim hold in the strict
+// sense on every platform: nothing here ever calls out to npm or touches
+// node_modules. The tradeoff versus chokidar is one native fs.watch handle
+// per directory in the tree (fine for a typical `functions/` folder;
+// `watchIgnore` exists to keep genuinely huge trees, e.g. a stray
+// node_modules someone points watchPaths at, out of the handle count).
+// Docs: fs.watch        https://nodejs.org/api/fs.html#fswatchfilename-options-listener
+//       fs.readdirSync   https://nodejs.org/api/fs.html#fsreaddirsyncpath-options
+//       fs.watch Availability (recursive option caveats) https://nodejs.org/api/fs.html#availability
+class DirTreeWatcher {
+  constructor(root, ignorePatterns, allowedExts, onChange) {
+    this.projectRoot = root;
+    this.ignorePatterns = ignorePatterns;
+    this.allowedExts = allowedExts;
+    this.onChange = onChange;
+    this.watchers = new Map(); // absolute dir path -> fs.FSWatcher
+  }
 
-async function resolveChokidar(cfg) {
-  if (_chokidar !== undefined) return _chokidar;
-  // Concurrent callers (multiple watched paths resolving at once) share one
-  // in-flight resolution instead of each attempting their own install.
-  if (_chokidarResolving) return _chokidarResolving;
+  // Recursively adds watchers for `dir` and every non-ignored subdirectory
+  // beneath it. Safe to call on an already-(partially)-watched dir --
+  // existing entries are left alone.
+  addTree(dir) {
+    if (isIgnored(dir, this.ignorePatterns, this.projectRoot)) return;
+    if (this.watchers.has(dir)) return;
+    if (!file_exists(dir)) return;
 
-  _chokidarResolving = (async () => {
-    if (process.platform !== 'linux') {
-      // fs.watch's recursive mode is already reliable here -- no need to
-      // add a dependency.
-      _chokidar = null;
-      return null;
-    }
-
+    let entries;
     try {
-      _chokidar = await import('chokidar');
-      return _chokidar;
-    } catch {
-      // not installed yet -- fall through to the install attempt below
-    }
-
-    if (!cfg.autoInstallChokidar) {
-      console.log(
-        '[qpurt] chokidar not installed and autoInstallChokidar is false -- ' +
-        'using fs.watch (recursive subfolder changes on Linux may be missed).'
-      );
-      _chokidar = null;
-      return null;
-    }
-
-    console.log('[qpurt] Linux detected and chokidar not found -- installing it in the background for reliable recursive watching...');
-    try {
-      // --no-save: installs into node_modules without touching the
-      // caller's package.json/lockfile. It's still on disk for next
-      // startup, so this only runs once per environment.
-      //
-      // Uses the async `exec` (not `execSync`) deliberately: npm install
-      // can take several seconds, and execSync blocks Node's entire
-      // single-threaded event loop for that whole time -- even called from
-      // inside an async function, nothing else (including in-flight HTTP
-      // requests) runs until it returns. exec runs npm in a child process
-      // and only awaits its completion, so the server keeps serving
-      // requests (via fs.watch, until chokidar is ready) while it installs.
-      // Docs: child_process.exec https://nodejs.org/api/child_process.html#child_processexeccommand-options-callback
-      const { stdout, stderr } = await exec('npm install chokidar --no-save', { cwd: process.cwd() });
-      if (stdout.trim()) console.log(stdout.trim());
-      if (stderr.trim()) console.error(stderr.trim());
-      _chokidar = await import('chokidar');
-      console.log('[qpurt] chokidar installed.');
-      return _chokidar;
+      entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch (err) {
-      console.error(
-        '[qpurt] failed to install/load chokidar, falling back to fs.watch ' +
-        '(recursive subfolder changes on Linux may be missed):', err.message
-      );
-      _chokidar = null;
-      return null;
+      // e.g. a race where the dir was removed between the existence check
+      // and the readdir -- not fatal, just skip it.
+      console.error(`[qpurt] failed to read directory ${dir}:`, err.message);
+      return;
     }
-  })();
 
-  return _chokidarResolving;
+    try {
+      const watcher = fs.watch(dir, (eventType, filename) => this._handleEvent(dir, filename));
+      watcher.on('error', (err) => {
+        console.error(`[qpurt] watch error for ${dir}, dropping watcher:`, err.message);
+        this.watchers.delete(dir);
+      });
+      this.watchers.set(dir, watcher);
+    } catch (err) {
+      console.error(`[qpurt] failed to watch ${dir}:`, err.message);
+      return;
+    }
+
+    for (const dirent of entries) {
+      if (dirent.isDirectory()) {
+        this.addTree(path.join(dir, dirent.name));
+      }
+    }
+  }
+
+  // Stops and forgets the watcher for `dir` and everything watched beneath
+  // it (used once a directory is deleted or renamed away).
+  removeTree(dir) {
+    const prefix = dir + path.sep;
+    for (const watched of [...this.watchers.keys()]) {
+      if (watched === dir || watched.startsWith(prefix)) {
+        this.watchers.get(watched).close();
+        this.watchers.delete(watched);
+      }
+    }
+  }
+
+  _handleEvent(dir, filename) {
+    // Some platforms/events (notably certain rename events) omit the
+    // filename -- nothing actionable to do with those.
+    if (!filename) return;
+
+    // If the watched directory itself has just been removed, fs.watch can
+    // report a self-referential event (on Linux rmdir this often arrives
+    // with the directory's own basename as `filename`). Resolving that
+    // against `dir` would produce a bogus dir/dir path, so check for "the
+    // directory I'm watching is simply gone" first and handle it directly.
+    if (!file_exists(dir)) {
+      if (this.watchers.has(dir)) this.removeTree(dir);
+      return;
+    }
+
+    const changed = path.resolve(dir, filename);
+    if (isIgnored(changed, this.ignorePatterns, this.projectRoot)) return;
+
+    if (file_exists(changed)) {
+      let stat;
+      try {
+        stat = fs.statSync(changed);
+      } catch {
+        return; // vanished between the exists check and stat -- ignore
+      }
+      if (stat.isDirectory()) {
+        // A new directory appeared underneath a watched folder -- start
+        // watching it (and anything already inside it, e.g. `cp -r` or
+        // `mkdir -p a/b/c` landing a populated subtree in one go).
+        this.addTree(changed);
+        return; // the mkdir itself isn't a reload-worthy "change"
+      }
+    } else if (this.watchers.has(changed)) {
+      // Path no longer exists and we had a watcher rooted there -- a
+      // watched directory was removed. Clean up its subtree and stop:
+      // a directory disappearing isn't a reload-worthy "change" (there's
+      // no module at that path to bump a version for).
+      this.removeTree(changed);
+      return;
+    }
+
+    if (!extensionAllowed(changed, this.allowedExts)) return;
+    this.onChange(changed);
+  }
+
+  close() {
+    for (const watcher of this.watchers.values()) watcher.close();
+    this.watchers.clear();
+  }
 }
 
-// Watches `targetPath` recursively and calls onChange(absolutePath) for
-// every change that passes the extension/ignore filters. Uses chokidar when
-// available (see resolveChokidar above), otherwise fs.watch.
-// Docs: fs.watch  https://nodejs.org/api/fs.html#fswatchfilename-options-listener
-//       chokidar  https://github.com/paulmillr/chokidar#api
-async function watchPath(root, targetPath, ignorePatterns, allowedExts, onChange, cfg) {
+// Watches `targetPath` recursively (if it's a directory) or directly (if
+// it's a single file) and calls onChange(absolutePath) for every change
+// that passes the extension/ignore filters.
+// Docs: fs.watch https://nodejs.org/api/fs.html#fswatchfilename-options-listener
+function watchPath(root, targetPath, ignorePatterns, allowedExts, onChange) {
   const resolved = path.resolve(targetPath);
   if (!file_exists(resolved)) {
     console.log(`[qpurt] warning: watch path does not exist, skipping: ${resolved}`);
     return;
   }
 
-  const chokidar = await resolveChokidar(cfg);
-
-  if (chokidar) {
-    const watcher = chokidar.watch(resolved, {
-      ignoreInitial: true,
-      ignored: (filePath) => isIgnored(path.resolve(filePath), ignorePatterns, root)
-    });
-    watcher.on('all', (eventType, filePath) => {
-      const changed = path.resolve(filePath);
-      if (!extensionAllowed(changed, allowedExts)) return;
-      onChange(changed);
-    });
-    watcher.on('error', (err) => console.error(`[qpurt] chokidar watch error for ${resolved}:`, err));
+  let stat;
+  try {
+    stat = fs.statSync(resolved);
+  } catch (err) {
+    console.error(`[qpurt] failed to stat watch path ${resolved}:`, err.message);
     return;
   }
 
-  try {
-    // recursive watching is native on macOS/Windows; on Linux this only
-    // reliably covers the directory itself, not guaranteed for deep
-    // subfolders. We only reach this path on Linux if chokidar was
-    // unavailable and couldn't be installed (or autoInstallChokidar was
-    // turned off) -- see resolveChokidar above.
-    fs.watch(resolved, { recursive: true }, (eventType, filename) => {
-      if (!filename) return;
-      const changed = path.resolve(resolved, filename);
-
-      if (!extensionAllowed(changed, allowedExts)) return;
-      if (isIgnored(changed, ignorePatterns, root)) return;
-
-      onChange(changed);
-    });
-  } catch (err) {
-    console.error(`[qpurt] failed to watch ${resolved}:`, err);
+  if (!stat.isDirectory()) {
+    // Single file: a direct fs.watch is reliable on every platform --
+    // it's only recursive directory watching that's Linux-shaky.
+    try {
+      fs.watch(resolved, () => {
+        if (!extensionAllowed(resolved, allowedExts)) return;
+        if (isIgnored(resolved, ignorePatterns, root)) return;
+        onChange(resolved);
+      });
+    } catch (err) {
+      console.error(`[qpurt] failed to watch ${resolved}:`, err.message);
+    }
+    return;
   }
+
+  const watcher = new DirTreeWatcher(root, ignorePatterns, allowedExts, onChange);
+  watcher.addTree(resolved);
 }
 
-async function startWatcher(cfg) {
+function startWatcher(cfg) {
   if (_watchersStarted) return;
   _watchersStarted = true;
 
@@ -666,7 +673,7 @@ async function startWatcher(cfg) {
     const resolved = path.resolve(p);
     if (seen.has(resolved)) continue;
     seen.add(resolved);
-    await watchPath(root, resolved, ignorePatterns, allowedExts, onChange, cfg);
+    watchPath(root, resolved, ignorePatterns, allowedExts, onChange);
   }
 
   const entryPath = path.resolve(entry);
@@ -782,12 +789,42 @@ export function server(c) {
       res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
     }
 
+    // Parse the URL once, up front, and reuse it for both route matching
+    // and static-file serving below. Docs: URL https://nodejs.org/api/url.html#class-url
+    const parsed = new URL(req.url, `http://${req.headers.host}`);
+    // SECURITY: decodeURIComponent throws URIError on malformed
+    // percent-encoding (e.g. a request for "/%"). Uncaught, that would
+    // propagate out of this async handler and (via the requestHandler
+    // wrapper below) become a 500 -- caught explicitly here instead so it's
+    // a clean 400. Same guard as startHttpRedirectServer above.
+    // Docs: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/decodeURIComponent#exceptions
+    let pathname;
+    try {
+      pathname = decodeURIComponent(parsed.pathname);
+    } catch {
+      res.writeHead(400);
+      res.end('Bad request');
+      return;
+    }
+
+    // Query params, e.g. `/something?foo=bar&foo=baz&x=1`. `query` is the
+    // convenient common case -- a plain object with one value per key (last
+    // one wins on repeats, matching how most frameworks default). For
+    // repeated keys or anything URLSearchParams offers (getAll, etc.), the
+    // full `searchParams` object is there too.
+    // Docs: URLSearchParams https://nodejs.org/api/url.html#class-urlsearchparams
+    req.searchParams = parsed.searchParams;
+    req.query = Object.fromEntries(parsed.searchParams);
+
     // Always read from the live `config` object (not a snapshot) so
     // watcher-driven reloads of qpurt.json take effect immediately.
     const routes = config.routes || [];
 
     for (const route of routes) {
-      if (req.url !== route.url) continue;
+      // Match against the pathname only, not the raw req.url -- otherwise
+      // a request like `/something?foo=bar` would never match a route
+      // registered as `/something`.
+      if (pathname !== route.url) continue;
 
       const funcPath = path.resolve(config.functions, route.func + '.js');
       if (!file_exists(funcPath)) {
@@ -841,18 +878,6 @@ export function server(c) {
           res.end('Server error');
         }
       }
-      return;
-    }
-
-    const parsed = new URL(req.url, `http://${req.headers.host}`);
-    // SECURITY: see the matching decodeURIComponent guard in
-    // startHttpRedirectServer above -- same crash, same fix.
-    let pathname;
-    try {
-      pathname = decodeURIComponent(parsed.pathname);
-    } catch {
-      res.writeHead(400);
-      res.end('Bad request');
       return;
     }
 
@@ -985,9 +1010,11 @@ export function server(c) {
           }
         }
         if (config.watch) {
-          startWatcher(config).catch((err) => {
+          try {
+            startWatcher(config);
+          } catch (err) {
             console.error('[qpurt] failed to start file watcher:', err);
-          });
+          }
           const watched = [config.functions, ...(config.watchPaths || [])].filter(Boolean);
           console.log(`[qpurt] watching for changes in: ${watched.join(', ')}`);
           if (config.watchIgnore && config.watchIgnore.length) {
