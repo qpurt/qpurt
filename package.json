@@ -2,20 +2,15 @@
   "name": "qpurt",
   "version": "0.10.0",
   "description": "A single-file, zero-dependency Node.js HTTP(S) server",
-  "author": {
-    "name": "Michael Arakilian",
-    "email": "arakilian0@gmail.com",
-    "url": "https://github.com/arakilian0"
-  },
   "license": "MIT",
   "type": "module",
-  "main": "qpurt.min.js",
+  "main": "index.js",
   "bin": {
     "qp": "bin/cli.js"
   },
   "scripts": {
     "start": "node test/server.start.js",
-    "minify": "npx terser qpurt.js --compress --mangle --module -o qpurt.min.js"
+    "minify": "npx terser index.js --compress --mangle --module -o index.min.js"
   },
   "repository": {
     "type": "git",
@@ -25,5 +20,12 @@
     "url": "https://github.com/qpurt/qpurt/issues"
   },
   "homepage": "https://github.com/qpurt/qpurt#readme",
-  "keywords": ["qpurt", "web", "http", "router", "app", "api"]
+  "keywords": [
+    "qpurt",
+    "web",
+    "http",
+    "router",
+    "app",
+    "api"
+  ]
 }

@@ -1,4 +1,4 @@
-import { server } from '../qpurt.min.js';
+import { server } from '../index.js';
 
 // server({
 //     "port": 4000,
