@@ -18,10 +18,10 @@ Copy `qpurt.js` into your project. That's it. qpurt only imports Node core modul
 `url`, `http`, `https`) and never shells out to `npm` or writes to
 `node_modules` on its own.
 
-For convenience and future CLI usage, an npm package is available:
+<!-- For convenience and future CLI usage, an npm package is available:
 ```
 npm install qpurt
-```
+``` -->
 
 ## Quick start
 
