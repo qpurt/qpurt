@@ -10,7 +10,7 @@
     "qp": "bin/cli.js"
   },
   "scripts": {
-    "start": "node test/server.start.js",
+    "start": "node .test/main.js",
     "minify": "npx terser index.js --compress --mangle --module -o index.min.js"
   },
   "repository": {
