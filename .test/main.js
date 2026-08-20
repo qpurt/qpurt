@@ -1,4 +1,5 @@
 import qpurt from '../index.js';
 
-qpurt.server();
 qpurt.build();
+qpurt.create();
+qpurt.server();
